@@ -1,6 +1,6 @@
 [project]
 name = "claude-p2p"
-version = "0.2.0"
+version = "0.2.1"
 description = "Peer-to-peer messaging between Claude Code instances owned by different people"
 readme = "README.md"
 license = { text = "MIT" }

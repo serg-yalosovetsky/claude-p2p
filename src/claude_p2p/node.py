@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import os
@@ -139,6 +140,7 @@ class Config:
     # argv for the desktop notification; {title} and {text} are substituted per
     # argument, never through a shell. Empty: the platform default, if any.
     notify_command: list[str] = field(default_factory=list)
+    trusted_proxies: list[str] = field(default_factory=list)
 
     @classmethod
     def load(cls, path: Path) -> Config:
@@ -470,7 +472,16 @@ class Node:
             def parse_request(self):
                 if not super().parse_request():
                     return False
-                if not node._rate_ok(self.client_address[0], ip=True):
+                client_ip = self.client_address[0]
+                if client_ip in node.config.trusted_proxies:
+                    forwarded = self.headers.get("X-Real-IP")
+                    if forwarded is None:
+                        forwarded = self.headers.get("X-Forwarded-For", "").rsplit(",", 1)[-1]
+                    try:
+                        client_ip = str(ipaddress.ip_address(forwarded.strip()))
+                    except ValueError:
+                        pass  # Invalid or absent headers retain the direct peer address.
+                if not node._rate_ok(client_ip, ip=True):
                     self._json(429, {"error": "rate limited"})
                     self.close_connection = True
                     return False

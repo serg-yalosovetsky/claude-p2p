@@ -140,6 +140,71 @@ def test_http_limits(peers):
         assert hasattr(a, '_ip_buckets')
 
 
+@pytest.fixture
+def http_node(peers):
+    import http.client
+    import threading
+
+    a, _ = peers
+    a.config.listen = '127.0.0.1:0'
+    with a.make_server() as srv:
+        thread = threading.Thread(target=srv.serve_forever, daemon=True)
+        thread.start()
+
+        def get(headers):
+            conn = http.client.HTTPConnection('127.0.0.1', srv.server_port, timeout=2)
+            try:
+                conn.request('GET', '/v1/hello', headers=headers)
+                response = conn.getresponse()
+                response.read()
+                return response.status
+            finally:
+                conn.close()
+
+        try:
+            yield a, get
+        finally:
+            srv.shutdown()
+            thread.join()
+
+
+@pytest.mark.parametrize('trusted', [False, True])
+def test_http_proxy_ip_buckets(http_node, trusted):
+    a, get = http_node
+    a.config.trusted_proxies = ['127.0.0.1'] if trusted else ['192.0.2.99']
+    for _ in range(120):
+        assert get({'X-Real-IP': '192.0.2.1'}) == 200
+    assert get({'X-Real-IP': '192.0.2.1'}) == 429
+    assert get({'X-Real-IP': '192.0.2.2'}) == (200 if trusted else 429)
+    assert set(a._ip_buckets) == ({'192.0.2.1', '192.0.2.2'} if trusted else {'127.0.0.1'})
+
+
+@pytest.mark.parametrize(('trusted', 'headers', 'expected'), [
+    (False, {'X-Forwarded-For': '192.0.2.1, 192.0.2.2'}, '127.0.0.1'),
+    (True, {'X-Forwarded-For': '192.0.2.1, 192.0.2.2'}, '192.0.2.2'),
+    (True, {'X-Real-IP': '192.0.2.3', 'X-Forwarded-For': '192.0.2.2'}, '192.0.2.3'),
+    (True, {'X-Real-IP': 'bad', 'X-Forwarded-For': '192.0.2.2'}, '127.0.0.1'),
+    (True, {'X-Real-IP': ''}, '127.0.0.1'),
+    (True, {'X-Real-IP': '192.0.2.1, 192.0.2.2'}, '127.0.0.1'),
+    (True, {'X-Forwarded-For': '192.0.2.1, bad'}, '127.0.0.1'),
+    (True, {'X-Forwarded-For': '192.0.2.1, '}, '127.0.0.1'),
+    (True, {'X-Real-IP': '2001:db8:0::1'}, '2001:db8::1'),
+    (True, {}, '127.0.0.1'),
+])
+def test_http_proxy_header_validation(http_node, trusted, headers, expected):
+    a, get = http_node
+    a.config.trusted_proxies = ['127.0.0.1'] if trusted else []
+    assert get(headers) == 200
+    assert set(a._ip_buckets) == {expected}
+
+
+def test_trusted_proxies_config_round_trip(tmp_path):
+    path = tmp_path / 'config.json'
+    assert node.Config.load(path).trusted_proxies == []
+    node.Config(trusted_proxies=['127.0.0.1', '::1']).save(path)
+    assert node.Config.load(path).trusted_proxies == ['127.0.0.1', '::1']
+
+
 def test_task_queue_bounded(peers, monkeypatch):
     a, _ = peers
     starts, replies = [], []
