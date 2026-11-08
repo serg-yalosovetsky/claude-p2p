@@ -58,9 +58,10 @@ def _raw_priv(key) -> bytes:
     )
 
 
-def fingerprint(sign_pub_b64: str) -> str:
-    """Short human-comparable id of a node: first 16 hex chars of sha256(pubkey)."""
-    return hashlib.sha256(b64d(sign_pub_b64)).hexdigest()[:16]
+def fingerprint(sign_pub_b64: str, box_pub_b64: str) -> str:
+    """Human-comparable digest binding both public keys, in fixed order."""
+    digest = hashlib.sha256(b64d(sign_pub_b64) + b64d(box_pub_b64)).hexdigest()[:16]
+    return "-".join(digest[i:i + 4] for i in range(0, 16, 4))
 
 
 @dataclass
@@ -79,7 +80,7 @@ class Identity:
 
     @property
     def fingerprint(self) -> str:
-        return fingerprint(self.sign_pub)
+        return fingerprint(self.sign_pub, self.box_pub)
 
     @classmethod
     def generate(cls, name: str) -> Identity:

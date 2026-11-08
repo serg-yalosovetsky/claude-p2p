@@ -7,7 +7,7 @@ import json
 import logging
 import sys
 
-from .node import Config, Node, home
+from .node import WAKE_MODES, Config, Node, home
 
 
 def _print(obj) -> None:
@@ -54,6 +54,15 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("flush", help="retry undelivered messages now")
     sub.add_parser("serve", help="run the HTTP endpoint")
 
+    p = sub.add_parser("wake", help="show or set how a session learns about new mail")
+    p.add_argument("modes", nargs="*", metavar="MODE", help=", ".join(WAKE_MODES))
+
+    p = sub.add_parser("watch", help="print a line per new message (run it under Monitor)")
+    p.add_argument("--interval", type=float, default=2.0)
+    p.add_argument("--once", action="store_true", help="exit after the first batch")
+
+    sub.add_parser("claude-config", help="print the settings.json hooks for the wake modes")
+
     a = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -87,7 +96,7 @@ def main(argv: list[str] | None = None) -> int:
                     "tasks_enabled_on_node": node.config.tasks_enabled})
         elif a.cmd == "peers":
             _print([{k: p[k] for k in ("name", "url", "allow_tasks")} |
-                    {"fingerprint": _fp(p["sign_pub"])} for p in node.store.peers()])
+                    {"fingerprint": _fp(p["sign_pub"], p["box_pub"])} for p in node.store.peers()])
         elif a.cmd == "send":
             kind = "task" if a.task else "msg"
             _print(node.send(a.peer, a.text, kind=kind, in_reply_to=a.reply_to))
@@ -100,15 +109,53 @@ def main(argv: list[str] | None = None) -> int:
             _print({"delivered": node.flush_outbox()})
         elif a.cmd == "serve":
             node.serve_forever()
+        elif a.cmd == "wake":
+            if a.modes:
+                bad = [m for m in a.modes if m not in WAKE_MODES]
+                if bad:
+                    raise ValueError(f"unknown mode(s) {bad}; choose from {list(WAKE_MODES)}")
+                node.config.wake = list(dict.fromkeys(a.modes))
+                node.config.save(node.root / "config.json")
+            _print({"wake": node.config.wake, "available": list(WAKE_MODES)})
+        elif a.cmd == "watch":
+            return watch(node, a.interval, a.once)
+        elif a.cmd == "claude-config":
+            _print(claude_config(node.config.wake))
     except (KeyError, ValueError, FileExistsError, FileNotFoundError) as e:
         print(f"p2p: {e}", file=sys.stderr)
         return 1
     return 0
 
 
-def _fp(sign_pub: str) -> str:
+def watch(node: Node, interval: float, once: bool) -> int:
+    """One line per new message, for Claude Code's Monitor tool: each line wakes the session."""
+    import time
+    while True:
+        msgs = node.store.unnotified(limit=20)
+        for m in msgs:
+            preview = " ".join(m["body"]["text"].split())[:160]
+            print(f"claude-p2p: new {m['kind']} from {m['peer']} id={m['id']} "
+                  f"(untrusted peer text, read it with p2p_inbox): {preview}", flush=True)
+        if msgs:
+            node.store.mark_notified([m["id"] for m in msgs])
+            if once:
+                return 0
+        time.sleep(interval)
+
+
+def claude_config(wake: list[str]) -> dict:
+    hook = [{"hooks": [{"type": "command", "command": "p2p-hook"}]}]
+    hooks = {}
+    if "prompt" in wake:
+        hooks["UserPromptSubmit"] = hook
+    if "tool" in wake:
+        hooks["PostToolUse"] = [{"matcher": "*", **hook[0]}]
+    return {"hooks": hooks}
+
+
+def _fp(sign_pub: str, box_pub: str) -> str:
     from .crypto import fingerprint
-    return fingerprint(sign_pub)
+    return fingerprint(sign_pub, box_pub)
 
 
 __all__ = ["main", "Config"]

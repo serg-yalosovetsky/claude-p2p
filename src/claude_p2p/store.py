@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 import time
@@ -26,6 +27,8 @@ CREATE TABLE IF NOT EXISTS messages (
     in_reply_to TEXT,
     ts          INTEGER NOT NULL,
     read        INTEGER NOT NULL DEFAULT 0,
+    -- a wake channel (hook, watch, desktop) already announced it
+    notified    INTEGER NOT NULL DEFAULT 0,
     -- outbox only: the sealed envelope, delivery state and retry bookkeeping
     envelope    TEXT,
     delivered   INTEGER NOT NULL DEFAULT 0,
@@ -50,18 +53,37 @@ class Store:
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA busy_timeout=5000")
         self._db.executescript(SCHEMA)
+        cols = {r["name"] for r in self._db.execute("PRAGMA table_info(messages)")}
+        if "notified" not in cols:  # state.db created by 0.1.0
+            self._db.execute(
+                "ALTER TABLE messages ADD COLUMN notified INTEGER NOT NULL DEFAULT 0")
         self._lock = threading.Lock()
 
     # ---- peers -------------------------------------------------------------
 
     def add_peer(self, name: str, sign_pub: str, box_pub: str, url: str) -> None:
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", name):
+            raise ValueError("peer name must be 1-64 characters: A-Za-z0-9_.-")
         with self._lock:
-            self._db.execute(
-                "INSERT INTO peers(name, sign_pub, box_pub, url, added_at) VALUES (?,?,?,?,?) "
-                "ON CONFLICT(name) DO UPDATE SET sign_pub=excluded.sign_pub, "
-                "box_pub=excluded.box_pub, url=excluded.url",
-                (name, sign_pub, box_pub, url, time.time()),
-            )
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                rows = self._db.execute(
+                    "SELECT * FROM peers WHERE name=? OR sign_pub=?", (name, sign_pub)
+                ).fetchall()
+                for row in rows:
+                    if row["sign_pub"] != sign_pub or row["box_pub"] != box_pub:
+                        raise ValueError(
+                            f"peer {row['name']} already pinned with other keys; remove it first")
+                if rows:
+                    self._db.execute("UPDATE peers SET url=? WHERE sign_pub=?", (url, sign_pub))
+                else:
+                    self._db.execute(
+                        "INSERT INTO peers(name, sign_pub, box_pub, url, added_at) "
+                        "VALUES (?,?,?,?,?)", (name, sign_pub, box_pub, url, time.time()))
+                self._db.execute("COMMIT")
+            except Exception:
+                self._db.execute("ROLLBACK")
+                raise
 
     def remove_peer(self, name: str) -> bool:
         with self._lock:
@@ -171,9 +193,24 @@ class Store:
         if mark_read and rows:
             with self._lock:
                 self._db.executemany(
-                    "UPDATE messages SET read=1 WHERE id=?", [(r["id"],) for r in rows]
+                    "UPDATE messages SET read=1, notified=1 WHERE id=?",
+                    [(r["id"],) for r in rows],
                 )
         return rows
+
+    def unnotified(self, limit: int = 20) -> list[dict]:
+        """Unread messages no wake channel has announced yet."""
+        rows = self._db.execute(
+            "SELECT * FROM messages WHERE direction='in' AND read=0 AND notified=0 "
+            "ORDER BY ts LIMIT ?",
+            (limit,),
+        )
+        return [_public(r) for r in rows]
+
+    def mark_notified(self, ids: list[str]) -> None:
+        with self._lock:
+            self._db.executemany(
+                "UPDATE messages SET notified=1 WHERE id=?", [(i,) for i in ids])
 
     def reply_to(self, msg_id: str) -> dict | None:
         r = self._db.execute(
