@@ -1,0 +1,15 @@
+# User unit: copy to ~/.config/systemd/user/ and run
+#   systemctl --user enable --now claude-p2p
+[Unit]
+Description=claude-p2p node
+After=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/p2p serve
+Restart=on-failure
+RestartSec=5
+# Exit code of SIGTERM is a normal stop.
+SuccessExitStatus=143
+
+[Install]
+WantedBy=default.target

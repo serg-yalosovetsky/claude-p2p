@@ -1,0 +1,42 @@
+[project]
+name = "claude-p2p"
+version = "0.1.0"
+description = "Peer-to-peer messaging between Claude Code instances owned by different people"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = [
+    "cryptography>=42",
+    "mcp>=1.2",
+]
+
+[project.scripts]
+p2p = "claude_p2p.cli:main"
+p2p-mcp = "claude_p2p.mcp_server:main"
+p2p-hook = "claude_p2p.hook:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/claude_p2p"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP", "S"]
+# S603: subprocess with a fixed argv list is the point of the task runner.
+# S310: urllib to a peer URL the owner pinned. S101: asserts in tests.
+ignore = ["S603", "S310"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "E731"]

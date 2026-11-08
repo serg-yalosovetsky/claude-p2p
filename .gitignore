@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+dist/
+uv.lock
+# node state: private keys and messages must never be committed
+.claude-p2p/
+identity.json
+state.db*
