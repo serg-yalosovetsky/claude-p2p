@@ -145,7 +145,9 @@ p2p allow-tasks serg
 `tasks_enabled`. Каждая задача получает новый `TemporaryDirectory` вне каталога
 узла; после завершения он удаляется. Ответ ограничен по байтам (до 32 КиБ).
 
-Профиль `claude -p` использует пустой `--allowedTools`, явный `--disallowedTools`
+Профиль `claude -p` использует `--tools ""` (пустой набор встроенных инструментов —
+белый список; без него у задачи оставались `SendMessage`, `ListAgents`, `DesignSync`
+и др.), пустой `--allowedTools`, явный `--disallowedTools`
 для чтения/записи файлов, shell, веба, агентов и других опасных инструментов,
 `--permission-mode dontAsk` и `--permission-prompts none`.
 `--strict-mcp-config --mcp-config '{"mcpServers":{}}'` исключает MCP владельца;

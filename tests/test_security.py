@@ -25,7 +25,10 @@ def test_task_isolation(peers, monkeypatch):
     def run(argv, **kw):
         calls.append(kw['cwd'])
         assert not Path(kw['cwd']).is_relative_to(a.root)
-        assert set(kw['env']) <= {'PATH', 'HOME'}
+        assert set(kw['env']) == set(node.task_env())
+        assert 'OWNER_PRIVATE' not in kw['env']
+        assert kw['encoding'] == 'utf-8'
+        assert argv[argv.index('--tools') + 1] == ''
         assert argv[argv.index('--allowedTools') + 1] == ''
         assert '--disallowedTools' in argv
         assert '--strict-mcp-config' in argv
@@ -286,3 +289,30 @@ def test_http_ip_limit_and_thread_capacity(peers):
                     srv._handler_slots.release()
         finally:
             srv.shutdown()
+
+
+def test_task_env_windows_keeps_runtime_vars():
+    environ = {'PATH': 'C:\\bin', 'SystemRoot': 'C:\\Windows', 'USERPROFILE': 'C:\\Users\\u',
+               'APPDATA': 'a', 'LOCALAPPDATA': 'l', 'TEMP': 't', 'TMP': 't',
+               'PATHEXT': '.EXE', 'OWNER_PRIVATE': 'synthetic-marker', 'ANTHROPIC_API_KEY': 'x'}
+    env = node.task_env('win32', environ)
+    assert env['SystemRoot'] == 'C:\\Windows'
+    assert {'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'TEMP'} <= set(env)
+    assert 'OWNER_PRIVATE' not in env and 'ANTHROPIC_API_KEY' not in env
+
+
+def test_task_env_posix_minimal():
+    env = node.task_env('linux', {'PATH': '/bin', 'SystemRoot': 'x', 'OWNER_PRIVATE': 'm'})
+    assert set(env) == {'PATH', 'HOME'}
+
+
+def test_task_failure_logged_not_leaked(peers, monkeypatch, caplog):
+    a, _ = peers
+    monkeypatch.setattr(node.subprocess, 'run', lambda *args, **kw: SimpleNamespace(
+        stdout='', stderr='secret-path C:/Users/owner boom', returncode=1))
+    monkeypatch.setattr(a, '_deliver', lambda *args: False)
+    with caplog.at_level('WARNING'):
+        a._run_task(a.store.peer('b'), {'id': 'task'}, 'hello')
+    assert 'boom' in caplog.text
+    body = a.store.undelivered()[0]['body']
+    assert 'exit 1' in body and 'boom' not in body and 'owner' not in body.replace("owner's", '')

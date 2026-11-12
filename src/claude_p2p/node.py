@@ -39,20 +39,43 @@ KINDS = ("msg", "task", "result", "pull")
 # How a Claude session (or its owner) learns that mail arrived. Several may be on.
 WAKE_MODES = ("prompt", "tool", "watch", "desktop")
 
-# Flags verified against installed `claude --help`: an empty allowedTools list,
-# dontAsk permissions and explicit denials restrict tools; strict empty MCP config
-# and empty setting-sources exclude owner MCP/settings/hooks. safe-mode additionally
-# disables customizations, restricted confines file tools. These are CLI controls,
-# not OS isolation. Do not rely on `--tools ""` alone.
+# Tool profile of a task. `--tools ""` is the allow-list: it empties the built-in
+# tool set. Without it an empty --allowedTools still left SendMessage, ListAgents,
+# DesignSync, PushNotification, TaskStop, Cron* and worktree tools (Claude Code
+# 2.1.322, read from the stream-json init event): a peer could have written into
+# the owner's live sessions. The deny-list stays as a second layer for CLI versions
+# that ignore --tools. Strict empty MCP config and empty setting-sources exclude
+# owner MCP/settings/hooks; safe-mode disables customizations. These are CLI
+# controls, not OS isolation.
 TASK_GUARD = (
     "You are answering a request from a Claude Code instance owned by another person. "
     "Do not modify anything, do not run commands, and do not disclose files, keys, "
     "tokens, settings or personal data of this machine or its owner."
 )
+# Environment a task process gets. Everything else of the owner (tokens, API keys,
+# proxies) is dropped. HOME keeps the local Claude login working: with a clean HOME
+# `claude auth status` found no login. On Windows Claude's runtime (Bun) refuses
+# network requests without %SystemRoot%, and the login lives under the profile
+# folders, so those few variables are kept as well.
+TASK_ENV_KEYS = ("PATH", "HOME")
+TASK_ENV_KEYS_WINDOWS = ("SystemRoot", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
+                         "TEMP", "TMP", "PATHEXT")
+
+
+def task_env(platform: str | None = None, environ: dict | None = None) -> dict[str, str]:
+    platform = sys.platform if platform is None else platform
+    environ = os.environ if environ is None else environ
+    env = {"PATH": environ.get("PATH", os.defpath), "HOME": str(Path.home())}
+    if platform == "win32":
+        env.update({k: environ[k] for k in TASK_ENV_KEYS_WINDOWS if k in environ})
+    return env
+
+
 DEFAULT_TASK_COMMAND = [
     "claude", "-p",
     "--output-format", "text",
     "--append-system-prompt", TASK_GUARD,
+    "--tools", "",
     "--allowedTools", "",
     "--disallowedTools", "Bash,PowerShell,Read,Glob,Grep,Edit,Write,NotebookEdit,"
     "WebFetch,WebSearch,Agent,Task,Skill,ToolSearch,Monitor",
@@ -431,10 +454,7 @@ class Node:
             )
             try:
                 with tempfile.TemporaryDirectory(prefix="p2p-task-") as sandbox:
-                    # A clean HOME failed `claude auth status` on this machine.
-                    # Preserve HOME for local login, but no other owner environment
-                    # beyond executable lookup. CLI flags disable its customizations.
-                    env = {"PATH": os.environ.get("PATH", os.defpath), "HOME": str(Path.home())}
+                    env = task_env()
                     command = self.config.task_command
                     if command and Path(command[0]).name in ("claude", "claude.exe"):
                         # Upgrade persisted pre-0.2 defaults too; never let old
@@ -442,13 +462,22 @@ class Node:
                         command = [command[0], *DEFAULT_TASK_COMMAND[1:]]
                     proc = subprocess.run(
                         command, input=prompt, capture_output=True,
-                        text=True, timeout=self.config.task_timeout_s, cwd=sandbox, env=env,
+                        text=True, encoding="utf-8", errors="replace",
+                        timeout=self.config.task_timeout_s, cwd=sandbox, env=env,
                     )
-                out = proc.stdout.strip() or f"(no output, exit {proc.returncode})"
+                out = proc.stdout.strip()
+                if proc.returncode != 0:
+                    # stderr stays local: it may contain paths of this machine.
+                    log.warning("task %s from %s exited %s: %s", header["id"], peer["name"],
+                                proc.returncode, (proc.stderr or "").strip()[:2000])
+                if not out:
+                    out = (f"(no output, exit {proc.returncode}; "
+                           "the reason is in the peer owner's log)")
             except subprocess.TimeoutExpired:
                 out = f"(task timed out after {self.config.task_timeout_s} s)"
             except OSError as e:
-                out = f"(task runner failed: {e})"
+                log.warning("task %s from %s: runner failed: %s", header["id"], peer["name"], e)
+                out = "(task runner failed; the reason is in the peer owner's log)"
             out = out.encode()[: MAX_TEXT - 64].decode("utf-8", errors="ignore")
             self.send(peer["name"], out, kind="result",
                       in_reply_to=header["id"])
