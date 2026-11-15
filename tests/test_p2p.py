@@ -112,9 +112,24 @@ def test_invite_rejects_garbage_and_self(tmp_path):
         n.add_peer(n.invite())
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode bits; Windows ACL is tested below")
 def test_identity_file_private(tmp_path):
     n = Node.init("me", "http://x", root=tmp_path / "me")
     assert (n.root / "identity.json").stat().st_mode & 0o077 == 0
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows ACL")
+def test_identity_file_private_windows_acl(tmp_path):
+    import subprocess
+
+    from claude_p2p import crypto as _crypto
+
+    n = Node.init("me", "http://x", root=tmp_path / "me")
+    out = subprocess.run([_crypto.icacls_path(), str(n.root / "identity.json")],
+                         capture_output=True, text=True).stdout
+    aces = [line.strip() for line in out.splitlines()[:-1] if line.strip()]
+    aces[0] = aces[0][len(str(n.root / "identity.json")):].strip()
+    assert aces == [f"{_crypto.windows_account()}:(F)"], aces
 
 
 # ---- live nodes ---------------------------------------------------------------

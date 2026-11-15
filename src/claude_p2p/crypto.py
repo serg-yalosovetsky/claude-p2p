@@ -15,6 +15,8 @@ import base64
 import hashlib
 import json
 import os
+import subprocess
+import sys
 import time
 import uuid
 from dataclasses import dataclass
@@ -64,6 +66,36 @@ def fingerprint(sign_pub_b64: str, box_pub_b64: str) -> str:
     return "-".join(digest[i:i + 4] for i in range(0, 16, 4))
 
 
+def icacls_path() -> str:
+    # Full path: a PATH lookup could pick up a planted icacls.
+    return os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "icacls.exe")
+
+
+def windows_account() -> str:
+    user = os.environ.get("USERNAME", "")
+    domain = os.environ.get("USERDOMAIN", "")
+    if not user:
+        raise RuntimeError("USERNAME is not set; cannot restrict the key file ACL")
+    return f"{domain}\\{user}" if domain else user
+
+
+def restrict_to_owner(path: Path) -> None:
+    """Windows: drop inherited ACEs and grant full control to the current user only.
+
+    Raises instead of continuing: private keys must not be written into a file that
+    other accounts can read.
+    """
+    proc = subprocess.run(
+        [icacls_path(), str(path), "/inheritance:r", "/grant:r", f"{windows_account()}:F"],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"icacls could not restrict {path} (exit {proc.returncode}): "
+            f"{(proc.stderr or proc.stdout).strip()}"
+        )
+
+
 @dataclass
 class Identity:
     name: str
@@ -94,6 +126,13 @@ class Identity:
         }
         path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        if sys.platform == "win32":
+            # The mode above is ignored on Windows: the file inherits the folder's
+            # ACL, which outside the user profile can grant Modify to other accounts.
+            # Restrict it while it is still empty, before any key is written.
+            os.close(fd)
+            restrict_to_owner(path)
+            fd = os.open(path, os.O_WRONLY | os.O_TRUNC)
         with os.fdopen(fd, "w") as f:
             json.dump(data, f)
 
