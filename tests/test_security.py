@@ -278,7 +278,9 @@ def test_http_ip_limit_and_thread_capacity(peers):
                 response.read()
                 conn.close()
             assert response.status == 429
-            assert len(a._buckets) == 120
+            # Forged unknown senders are stopped by the per-IP limit; they get no
+            # per-sender bucket, so they cannot crowd out pinned peers.
+            assert len(a._buckets) == 0
             for _ in range(32):
                 assert srv._handler_slots.acquire(timeout=2)
             try:
@@ -316,3 +318,13 @@ def test_task_failure_logged_not_leaked(peers, monkeypatch, caplog):
     assert 'boom' in caplog.text
     body = a.store.undelivered()[0]['body']
     assert 'exit 1' in body and 'boom' not in body and 'owner' not in body.replace("owner's", '')
+
+
+def test_unauthenticated_from_cannot_lock_out_pinned_peers(peers):
+    a, b = peers
+    for i in range(node.MAX_BUCKETS + 10):
+        a.receive({'from': f'garbage{i}'})
+    pinned = a.store.peer('b')
+    env = crypto.seal(b.identity, a.identity.sign_pub, a.identity.box_pub, 'msg', {'text': 'hi'})
+    assert pinned['sign_pub'] == b.identity.sign_pub
+    assert a.receive(env)[0] == 202

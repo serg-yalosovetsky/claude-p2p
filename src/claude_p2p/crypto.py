@@ -202,6 +202,12 @@ def open_envelope(
         raise EnvelopeError("malformed envelope")
     if env["v"] != PROTOCOL:
         raise EnvelopeError(f"unsupported protocol {env['v']!r}")
+    # Header fields go into SQL and log lines on the receiver; a peer must not be
+    # able to crash the handler with a non-string value.
+    if (not all(isinstance(env[k], str) for k in ("id", "from", "to", "kind", "nonce", "ct", "sig"))
+            or not 0 < len(env["id"]) <= 128
+            or not (env["in_reply_to"] is None or isinstance(env["in_reply_to"], str))):
+        raise EnvelopeError("malformed envelope")
     if env["to"] != me.sign_pub:
         raise EnvelopeError("not addressed to this node")
     box_pub = peer_box_pub_for(env["from"])

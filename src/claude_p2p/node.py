@@ -361,7 +361,13 @@ class Node:
     def receive(self, env: dict) -> tuple[int, dict]:
         """Handle one envelope POSTed by a peer. Returns (http_status, json_body)."""
         sender = env.get("from") if isinstance(env, dict) else None
-        if not isinstance(sender, str) or not self._rate_ok(sender):
+        # `from` is unauthenticated here. Only pinned keys get a per-sender bucket,
+        # so forged senders cannot fill the bucket table and lock out real peers;
+        # unknown senders are refused by open_envelope before any crypto work, and
+        # the per-IP limit in the HTTP handler still applies to them.
+        if not isinstance(sender, str):
+            return 403, {"error": "malformed envelope"}
+        if self.store.peer_by_key(sender) is not None and not self._rate_ok(sender):
             return 429, {"error": "rate limited"}
         return self._open_and_accept(env, allow_pull=True)
 
@@ -410,7 +416,9 @@ class Node:
         acks = body.get("ack") if isinstance(body, dict) else None
         if isinstance(acks, list):
             self.store.ack(peer["name"], [a for a in acks if isinstance(a, str)][:PULL_BATCH * 2])
-        return 200, {"envelopes": self.store.queued_for(peer["name"], PULL_BATCH)}
+        # Same margin as flush_outbox: the puller would reject older envelopes.
+        min_ts = int(time.time() - crypto.MAX_AGE_S + 3600)
+        return 200, {"envelopes": self.store.queued_for(peer["name"], PULL_BATCH, min_ts)}
 
     def _maybe_run_task(self, peer: dict, header: dict, text: str) -> None:
         if not (self.config.tasks_enabled and peer["allow_tasks"]):
