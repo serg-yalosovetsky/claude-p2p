@@ -127,12 +127,17 @@ class Store:
             cur = self._db.execute("INSERT OR IGNORE INTO seen(id, ts) VALUES (?,?)", (msg_id, ts))
             return cur.rowcount > 0
 
-    def queued_for(self, peer: str, limit: int = 50) -> list[dict]:
-        """Undelivered envelopes for a peer that collects its mail by pulling."""
+    def queued_for(self, peer: str, limit: int = 50, min_ts: int = 0) -> list[dict]:
+        """Undelivered envelopes for a peer that collects its mail by pulling.
+
+        Envelopes older than min_ts are skipped: the peer would reject them as too
+        old and never ack them, so they would hold the head of the queue for good.
+        They stay undelivered and visible in the outbox.
+        """
         rows = self._db.execute(
             "SELECT envelope FROM messages WHERE direction='out' AND delivered=0 AND peer=? "
-            "ORDER BY ts LIMIT ?",
-            (peer, limit),
+            "AND ts >= ? ORDER BY ts LIMIT ?",
+            (peer, min_ts, limit),
         )
         return [json.loads(r["envelope"]) for r in rows]
 

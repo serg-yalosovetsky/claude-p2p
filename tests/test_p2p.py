@@ -277,3 +277,44 @@ def test_outbox_lists_mail_waiting_for_pull(hub_and_nat):
     hub, _ = hub_and_nat
     hub.send("home", "waiting")
     assert [r["peer"] for r in hub.store.undelivered()] == ["home"]
+
+
+def test_stale_mail_does_not_block_the_pull_queue(hub_and_nat, monkeypatch):
+    """Envelopes the receiver would reject as too old must not hold the queue head."""
+    hub, nat = hub_and_nat
+    real = time.time
+    old = real() - 8 * 86400
+    monkeypatch.setattr(crypto.time, "time", lambda: old)
+    for i in range(60):
+        hub.send("home", f"stale {i}")
+    monkeypatch.setattr(crypto.time, "time", real)
+    hub.send("home", "fresh")
+    for _ in range(3):
+        nat.tick()
+    texts = [m["body"]["text"] for m in nat.store.inbox(unread_only=False)]
+    assert texts == ["fresh"]
+    # The expired mail stays visible to the owner in the outbox, never delivered.
+    assert len(hub.store.undelivered()) == 60
+
+
+def test_non_string_header_fields_rejected_not_crashing():
+    a, b = _ids()
+    lookup = lambda k: a.box_pub if k == a.sign_pub else None  # noqa: E731
+    env = crypto.seal(a, b.sign_pub, b.box_pub, "msg", {"text": "x"}, in_reply_to={"x": 1})
+    with pytest.raises(crypto.EnvelopeError):
+        crypto.open_envelope(b, env, lookup)
+    env = crypto.seal(a, b.sign_pub, b.box_pub, "msg", {"text": "x"})
+    env["from"] = {"x": 1}
+    with pytest.raises(crypto.EnvelopeError):
+        crypto.open_envelope(b, env, lambda k: pytest.fail("looked up a non-string key"))
+
+
+def test_non_string_in_reply_to_gets_4xx(pair):
+    """A peer's malformed in_reply_to must get a 4xx, not an uncaught sqlite error."""
+    a, b = pair
+    peer = b.store.peer("alice")
+    bad = crypto.seal(b.identity, peer["sign_pub"], peer["box_pub"], "msg", {"text": "bad"},
+                      in_reply_to={"x": 1})
+    status, _ = a.receive(bad)
+    assert status in (400, 403)
+    assert a.store.inbox() == []
